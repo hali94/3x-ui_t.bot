@@ -1,0 +1,125 @@
+version: "3.9"
+
+x-common: &common
+  env_file: .env
+  restart: unless-stopped
+  networks:
+    - vpn_net
+
+services:
+
+  # ── PostgreSQL ─────────────────────────────────────────────────────────────
+  postgres:
+    <<: *common
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: vpnuser
+      POSTGRES_PASSWORD: vpnpass
+      POSTGRES_DB: vpndb
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vpnuser -d vpndb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis ──────────────────────────────────────────────────────────────────
+  redis:
+    <<: *common
+    image: redis:7-alpine
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ── Migrations (run once on deploy) ───────────────────────────────────────
+  migrate:
+    <<: *common
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: base
+    command: alembic upgrade head
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # ── FastAPI Backend ────────────────────────────────────────────────────────
+  api:
+    <<: *common
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: api
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── Telegram Bot ───────────────────────────────────────────────────────────
+  bot:
+    <<: *common
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: bot
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  # ── Celery Worker + Beat ───────────────────────────────────────────────────
+  worker:
+    <<: *common
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  # ── Flower (Celery monitoring) ─────────────────────────────────────────────
+  flower:
+    <<: *common
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: worker
+    command: celery -A app.workers.celery_app flower --port=5555
+    ports:
+      - "5555:5555"
+    depends_on:
+      - redis
+      - worker
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  vpn_net:
+    driver: bridge
