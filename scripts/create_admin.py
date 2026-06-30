@@ -2,11 +2,14 @@
 One-time script: promote a Telegram user to ADMIN role.
 
 Usage:
-    python scripts/create_admin.py <telegram_id> <full_name>
+    docker compose exec api python scripts/create_admin.py <telegram_id> <full_name>
 """
 
 import asyncio
 import sys
+import os
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
 async def main(telegram_id: int, full_name: str) -> None:
@@ -22,7 +25,11 @@ async def main(telegram_id: int, full_name: str) -> None:
         user.role = UserRole.ADMIN
         user.status = UserStatus.ACTIVE
         await session.commit()
-        print(f"✅ Admin created: id={user.id} telegram_id={user.telegram_id} name={user.full_name}")
+        print(f"✅ Admin created/updated:")
+        print(f"   id          = {user.id}")
+        print(f"   telegram_id = {user.telegram_id}")
+        print(f"   full_name   = {user.full_name}")
+        print(f"   role        = {user.role}")
 
 
 if __name__ == "__main__":

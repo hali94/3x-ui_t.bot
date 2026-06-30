@@ -2,7 +2,7 @@ from typing import Any, Callable, Awaitable
 import redis.asyncio as aioredis
 from aiogram import BaseMiddleware
 from aiogram.types import TelegramObject, Message, CallbackQuery
-from app.security.rate_limiter import RateLimiter
+from app.security.rate_limiter import RateLimiter, RateLimitExceeded
 
 
 class RateLimitMiddleware(BaseMiddleware):
@@ -20,10 +20,10 @@ class RateLimitMiddleware(BaseMiddleware):
             return await handler(event, data)
         try:
             await self.limiter.check_telegram_user(user_obj.id)
-        except Exception:
+        except RateLimitExceeded as exc:
             if isinstance(event, Message):
-                await event.answer("⏳ تعداد درخواست‌های شما زیاد است. لطفاً کمی صبر کنید.")
+                await event.answer(f"⏳ {exc}")
             elif isinstance(event, CallbackQuery):
-                await event.answer("⏳ لطفاً کمی صبر کنید.", show_alert=True)
+                await event.answer(f"⏳ {exc}", show_alert=True)
             return
         return await handler(event, data)

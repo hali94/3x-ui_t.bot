@@ -1,8 +1,11 @@
 """
-Core business service: create, renew, and manage VPN subscriptions.
+Subscription creation and renewal service.
 
-This is the primary orchestration layer between the Telegram bot / API and
-3x-ui. All credit checks, UUID generation, and audit logging happen here.
+Critical fixes applied:
+- Single XUI session per operation (was two).
+- Credit deduction via SELECT FOR UPDATE (race-condition safe).
+- buy/sell price separation for profit tracking.
+- Proper IDOR guard on renewal.
 """
 
 import logging
@@ -51,16 +54,8 @@ class SubscriptionService:
         server: Server,
         customer_telegram_id: int | None = None,
     ) -> tuple[Customer, Subscription, str]:
-        """
-        Full flow:
-        1. Load reseller and check credit
-        2. Generate UUID / email
-        3. Push client to 3x-ui
-        4. Persist Customer + Subscription + Sale
-        5. Deduct reseller credit
-        6. Return (customer, subscription, link)
-        """
-        reseller = await self.reseller_repo.get_by_user_id(reseller_user_id)
+        # Lock reseller row immediately to prevent concurrent credit abuse
+        reseller = await self.reseller_repo.get_by_user_id_with_lock(reseller_user_id)
         if not reseller:
             raise ValueError("نماینده یافت نشد")
         if not reseller.active:
@@ -69,8 +64,9 @@ class SubscriptionService:
         gb = Decimal(str(volume_gb))
         if not reseller.can_sell(gb):
             raise ValueError(
-                f"موجودی کافی نیست\n"
-                f"اعتبار باقی‌مانده: {reseller.remaining_credit_gb:.2f} گیگ"
+                f"❌ موجودی کافی نیست\n"
+                f"اعتبار باقی‌مانده: {reseller.remaining_credit_gb:.2f} گیگ\n"
+                f"درخواست شما: {gb:.2f} گیگ"
             )
 
         client_uuid = generate_uuid()
@@ -86,24 +82,18 @@ class SubscriptionService:
             enable=True,
         )
 
+        # Single XUI session: add client AND fetch inbound in one connection
+        link = ""
         async with XUIClientFactory.create(
             server.xui_url, server.xui_username, server.xui_password
         ) as xui:
             await xui.add_client(server.default_inbound_id, xui_settings)
-
-        # Build the VLESS link (simplified — real link requires inbound stream settings)
-        inbound = None
-        async with XUIClientFactory.create(
-            server.xui_url, server.xui_username, server.xui_password
-        ) as xui:
             try:
                 inbound = await xui.get_inbound(server.default_inbound_id)
+                link = self._build_link(client_uuid, email, server, inbound)
             except Exception:
-                pass
+                link = self._build_link(client_uuid, email, server, None)
 
-        link = self._build_link(client_uuid, email, server, inbound)
-
-        # Persist
         customer = Customer(
             telegram_id=customer_telegram_id,
             reseller_id=reseller.id,
@@ -117,13 +107,17 @@ class SubscriptionService:
         )
         customer = await self.customer_repo.create(customer)
 
-        price = gb * reseller.price_per_gb
+        sell_price = reseller.sell_price_per_gb
+        buy_price = reseller.buy_price_per_gb
+        amount = gb * sell_price
+        profit = gb * (sell_price - buy_price)
+
         sub = Subscription(
             customer_id=customer.id,
             reseller_id=reseller.id,
             server_id=server.id,
             volume_gb=gb,
-            price=price,
+            price=amount,
             expire_date=expire_dt,
             xui_client_id=client_uuid,
             inbound_id=server.default_inbound_id,
@@ -137,23 +131,29 @@ class SubscriptionService:
             customer_id=customer.id,
             subscription_id=sub.id,
             gb=gb,
-            amount=price,
+            buy_price_per_gb=buy_price,
+            sell_price_per_gb=sell_price,
+            amount=amount,
+            profit=profit,
         )
         await self.sale_repo.create(sale)
 
-        # Deduct credit — does the final atomic check
-        await self.reseller_repo.deduct_credit(reseller.id, gb)
+        # Credit already locked — deduct directly (no second lock needed)
+        reseller.used_gb += gb
+        await self.session.flush()
 
-        reseller_user = await self.user_repo.get_with_reseller(reseller_user_id)
         await self.audit_repo.log(
-            action="RESELLER_CREATED_CLIENT",
-            user_id=reseller_user.id if reseller_user else None,
+            action="RESELLER_CREATED_SUBSCRIPTION",
+            user_id=reseller.user_id,
             data={
                 "reseller_id": reseller.id,
+                "reseller_level": reseller.level,
                 "customer_email": email,
                 "volume_gb": float(gb),
                 "duration_days": duration_days,
                 "server_id": server.id,
+                "amount": float(amount),
+                "profit": float(profit),
             },
         )
 
@@ -161,12 +161,11 @@ class SubscriptionService:
             "subscription_created",
             extra={
                 "reseller_id": reseller.id,
-                "client_email": email,
+                "level": reseller.level,
+                "email": email,
                 "volume_gb": float(gb),
-                "duration_days": duration_days,
             },
         )
-
         return customer, sub, link
 
     async def renew_subscription(
@@ -177,18 +176,21 @@ class SubscriptionService:
         duration_days: int,
         server: Server,
     ) -> tuple[Customer, Subscription]:
-        reseller = await self.reseller_repo.get_by_user_id(reseller_user_id)
+        reseller = await self.reseller_repo.get_by_user_id_with_lock(reseller_user_id)
         if not reseller:
             raise ValueError("نماینده یافت نشد")
+        if not reseller.active:
+            raise ValueError("حساب نماینده غیرفعال است")
 
         customer = await self.customer_repo.get(customer_id)
+        # IDOR guard: customer must belong to this reseller
         if not customer or customer.reseller_id != reseller.id:
-            raise ValueError("مشتری یافت نشد")
+            raise ValueError("⛔ مشتری یافت نشد یا دسترسی ندارید")
 
         gb = Decimal(str(volume_gb))
         if not reseller.can_sell(gb):
             raise ValueError(
-                f"موجودی کافی نیست\n"
+                f"❌ موجودی کافی نیست\n"
                 f"اعتبار باقی‌مانده: {reseller.remaining_credit_gb:.2f} گیگ"
             )
 
@@ -206,8 +208,8 @@ class SubscriptionService:
         async with XUIClientFactory.create(
             server.xui_url, server.xui_username, server.xui_password
         ) as xui:
-            await xui.update_client(customer.uuid, server.default_inbound_id, xui_settings)
-            await xui.reset_client_traffic(server.default_inbound_id, customer.email)
+            await xui.update_client(server.default_inbound_id, xui_settings)
+            await xui.reset_client_traffic(customer.email)
 
         customer.volume_gb = gb
         customer.used_gb = Decimal("0")
@@ -220,13 +222,17 @@ class SubscriptionService:
             old_sub.status = SubscriptionStatus.RENEWED
             await self.session.flush()
 
-        price = gb * reseller.price_per_gb
+        sell_price = reseller.sell_price_per_gb
+        buy_price = reseller.buy_price_per_gb
+        amount = gb * sell_price
+        profit = gb * (sell_price - buy_price)
+
         sub = Subscription(
             customer_id=customer.id,
             reseller_id=reseller.id,
             server_id=server.id,
             volume_gb=gb,
-            price=price,
+            price=amount,
             expire_date=expire_dt,
             xui_client_id=customer.uuid,
             inbound_id=server.default_inbound_id,
@@ -239,21 +245,46 @@ class SubscriptionService:
             customer_id=customer.id,
             subscription_id=sub.id,
             gb=gb,
-            amount=price,
+            buy_price_per_gb=buy_price,
+            sell_price_per_gb=sell_price,
+            amount=amount,
+            profit=profit,
         )
         await self.sale_repo.create(sale)
-        await self.reseller_repo.deduct_credit(reseller.id, gb)
+
+        reseller.used_gb += gb
+        await self.session.flush()
 
         await self.audit_repo.log(
-            action="RESELLER_RENEWED_CLIENT",
-            data={"reseller_id": reseller.id, "customer_id": customer.id, "volume_gb": float(gb)},
+            action="RESELLER_RENEWED_SUBSCRIPTION",
+            user_id=reseller.user_id,
+            data={
+                "reseller_id": reseller.id,
+                "customer_id": customer.id,
+                "volume_gb": float(gb),
+                "duration_days": duration_days,
+            },
         )
-
         return customer, sub
 
     @staticmethod
     def _build_link(uuid: str, email: str, server: Server, inbound) -> str:
-        if inbound is None:
-            return f"vless://{uuid}@{server.xui_url.replace('http://', '').replace('https://', '').split(':')[0]}:443?type=tcp&security=tls#{email}"
-        host = server.xui_url.replace("http://", "").replace("https://", "").split(":")[0]
-        return f"vless://{uuid}@{host}:{inbound.port}?type=tcp&security=none#{email}"
+        import urllib.parse
+        host = (
+            server.xui_url
+            .replace("https://", "")
+            .replace("http://", "")
+            .split(":")[0]
+            .split("/")[0]
+        )
+        if inbound is not None and inbound.port:
+            return (
+                f"vless://{uuid}@{host}:{inbound.port}"
+                f"?type=tcp&security=none"
+                f"#{urllib.parse.quote(email)}"
+            )
+        return (
+            f"vless://{uuid}@{host}:443"
+            f"?type=tcp&security=tls"
+            f"#{urllib.parse.quote(email)}"
+        )

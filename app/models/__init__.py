@@ -1,5 +1,5 @@
 from app.models.user import User, UserRole, UserStatus
-from app.models.reseller import Reseller
+from app.models.reseller import Reseller, ResellerLevel, ResellerStatus
 from app.models.server import Server
 from app.models.customer import Customer, CustomerStatus
 from app.models.subscription import Subscription, SubscriptionStatus
@@ -9,7 +9,7 @@ from app.models.audit_log import AuditLog
 
 __all__ = [
     "User", "UserRole", "UserStatus",
-    "Reseller",
+    "Reseller", "ResellerLevel", "ResellerStatus",
     "Server",
     "Customer", "CustomerStatus",
     "Subscription", "SubscriptionStatus",

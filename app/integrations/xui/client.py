@@ -1,14 +1,14 @@
 """
 3x-ui API integration client.
 
-Handles authentication via session cookie, retries on transient failures,
-structured logging, and maps all API responses to typed dataclasses.
+Built against the current 3x-ui OpenAPI spec (v2+ client-centric endpoints).
+Auth: session cookie (POST /login) with automatic re-auth on 401.
+Retries: tenacity exponential backoff on connection/timeout errors.
 """
 
-import json
 import logging
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import quote
 
 import httpx
 from tenacity import (
@@ -117,7 +117,6 @@ class XUIClient:
             raise XUITimeoutException(str(exc)) from exc
 
         if resp.status_code == 401:
-            # Session expired — re-authenticate once
             logger.info("xui_session_expired_reauth", extra={"url": self._base_url})
             await self._authenticate()
             resp = await self._client.request(
@@ -157,39 +156,43 @@ class XUIClient:
         return XUIInbound.from_dict(obj)
 
     # ------------------------------------------------------------------
-    # Clients
+    # Clients  (new /panel/api/clients/* endpoints)
     # ------------------------------------------------------------------
 
     async def add_client(self, inbound_id: int, client: XUIClientSettings) -> None:
+        """Create a new client and attach it to the given inbound."""
         payload = {
-            "id": inbound_id,
-            "settings": json.dumps({"clients": [client.to_dict()]}),
+            "client": client.to_dict(),
+            "inboundIds": [inbound_id],
         }
-        await self._post("/panel/api/inbounds/addClient", json=payload)
+        await self._post("/panel/api/clients/add", json=payload)
         logger.info(
             "xui_client_added",
             extra={"inbound_id": inbound_id, "email": client.email, "uuid": client.id},
         )
 
-    async def update_client(self, client_uuid: str, inbound_id: int, client: XUIClientSettings) -> None:
+    async def update_client(self, inbound_id: int, client: XUIClientSettings) -> None:
+        """Update an existing client identified by email."""
         payload = {
-            "id": inbound_id,
-            "settings": json.dumps({"clients": [client.to_dict()]}),
+            "client": client.to_dict(),
+            "inboundIds": [inbound_id],
         }
-        await self._post(f"/panel/api/inbounds/updateClient/{client_uuid}", json=payload)
-        logger.info("xui_client_updated", extra={"uuid": client_uuid, "email": client.email})
+        await self._post(f"/panel/api/clients/update/{quote(client.email, safe='')}", json=payload)
+        logger.info("xui_client_updated", extra={"email": client.email})
 
-    async def delete_client(self, inbound_id: int, client_uuid: str) -> None:
-        await self._post(f"/panel/api/inbounds/{inbound_id}/delClient/{client_uuid}")
-        logger.info("xui_client_deleted", extra={"inbound_id": inbound_id, "uuid": client_uuid})
+    async def delete_client(self, email: str) -> None:
+        """Delete a client by email address."""
+        await self._post(f"/panel/api/clients/del/{quote(email, safe='')}")
+        logger.info("xui_client_deleted", extra={"email": email})
 
     # ------------------------------------------------------------------
     # Traffic
     # ------------------------------------------------------------------
 
     async def get_client_traffic(self, email: str) -> XUIClientTraffic | None:
+        """Fetch client details including current traffic counters."""
         try:
-            body = await self._get(f"/panel/api/inbounds/getClientTraffics/{email}")
+            body = await self._get(f"/panel/api/clients/get/{quote(email, safe='')}")
             obj = body.get("obj")
             if not obj:
                 return None
@@ -197,17 +200,13 @@ class XUIClient:
         except XUIServerException:
             return None
 
-    async def reset_client_traffic(self, inbound_id: int, email: str) -> None:
-        await self._post(f"/panel/api/inbounds/{inbound_id}/resetClientTraffic/{email}")
-        logger.info("xui_traffic_reset", extra={"inbound_id": inbound_id, "email": email})
+    async def reset_client_traffic(self, email: str) -> None:
+        """Reset traffic counters for a single client."""
+        await self._post("/panel/api/clients/bulkResetTraffic", json={"emails": [email]})
+        logger.info("xui_traffic_reset", extra={"email": email})
 
 
 class XUIClientFactory:
-    """
-    Factory that creates and caches XUIClient instances per server.
-    Callers should use the context manager returned by `get_client`.
-    """
-
     @staticmethod
     def create(base_url: str, username: str, password: str) -> XUIClient:
         return XUIClient(base_url=base_url, username=username, password=password)

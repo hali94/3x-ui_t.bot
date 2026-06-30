@@ -34,7 +34,12 @@ class UserRepository(BaseRepository[User]):
         return await self.create(user)
 
     async def list_resellers(self, active_only: bool = True) -> list[User]:
-        q = select(User).options(selectinload(User.reseller_profile)).where(User.role == UserRole.RESELLER)
+        roles = [UserRole.RESELLER_L1, UserRole.RESELLER_L2, UserRole.RESELLER]
+        q = (
+            select(User)
+            .options(selectinload(User.reseller_profile))
+            .where(User.role.in_(roles))
+        )
         if active_only:
             q = q.where(User.status == UserStatus.ACTIVE)
         result = await self.session.execute(q)

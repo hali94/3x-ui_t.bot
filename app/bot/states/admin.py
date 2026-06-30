@@ -5,8 +5,8 @@ class CreateResellerStates(StatesGroup):
     waiting_telegram_id = State()
     waiting_full_name = State()
     waiting_credit_gb = State()
-    waiting_price_per_gb = State()
-    waiting_max_sale_gb = State()
+    waiting_price_per_gb = State()    # buy price
+    waiting_max_sale_gb = State()     # sell price (reused field name for backward compat)
     confirm = State()
 
 

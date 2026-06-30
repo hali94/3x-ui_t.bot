@@ -4,7 +4,7 @@ from typing import Any
 
 @dataclass
 class XUIClientSettings:
-    id: str
+    id: str          # UUID for VLESS/VMess
     email: str
     flow: str = ""
     limit_ip: int = 0
@@ -49,14 +49,17 @@ class XUIClientTraffic:
 
     @classmethod
     def from_dict(cls, data: dict) -> "XUIClientTraffic":
+        # New API: GET /panel/api/clients/get/{email} nests traffic under "traffic" key
+        traffic = data.get("traffic") or {}
+        inbound_ids = data.get("inboundIds") or []
         return cls(
             id=data.get("id", 0),
-            inbound_id=data.get("inboundId", 0),
+            inbound_id=inbound_ids[0] if inbound_ids else 0,
             enable=data.get("enable", True),
             email=data.get("email", ""),
-            up=data.get("up", 0),
-            down=data.get("down", 0),
-            total=data.get("total", 0),
+            up=traffic.get("up", data.get("up", 0)),
+            down=traffic.get("down", data.get("down", 0)),
+            total=data.get("totalGB", data.get("total", 0)),
             expiry_time=data.get("expiryTime", 0),
         )
 

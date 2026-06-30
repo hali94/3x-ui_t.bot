@@ -9,12 +9,21 @@ class Sale(Base):
     __tablename__ = "sales"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    reseller_id: Mapped[int] = mapped_column(ForeignKey("resellers.id", ondelete="RESTRICT"), nullable=False, index=True)
-    customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id", ondelete="RESTRICT"), nullable=False, index=True)
-    subscription_id: Mapped[int] = mapped_column(ForeignKey("subscriptions.id", ondelete="RESTRICT"), nullable=False, index=True)
+    reseller_id: Mapped[int] = mapped_column(
+        ForeignKey("resellers.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    customer_id: Mapped[int] = mapped_column(
+        ForeignKey("customers.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    subscription_id: Mapped[int] = mapped_column(
+        ForeignKey("subscriptions.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
 
-    gb: Mapped[Decimal] = mapped_column(Numeric(12, 3), nullable=False)
-    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    gb: Mapped[Decimal] = mapped_column(Numeric(14, 3), nullable=False)
+    buy_price_per_gb: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    sell_price_per_gb: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    amount: Mapped[Decimal] = mapped_column(Numeric(16, 2), nullable=False)
+    profit: Mapped[Decimal] = mapped_column(Numeric(16, 2), nullable=False, default=0)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -24,4 +33,4 @@ class Sale(Base):
     subscription: Mapped["Subscription"] = relationship("Subscription")
 
     def __repr__(self) -> str:
-        return f"<Sale id={self.id} reseller_id={self.reseller_id} gb={self.gb}>"
+        return f"<Sale id={self.id} reseller_id={self.reseller_id} gb={self.gb} profit={self.profit}>"
